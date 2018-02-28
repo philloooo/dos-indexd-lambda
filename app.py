@@ -1,20 +1,25 @@
 """
 dos-indexd-lambda
-This lambda proxies requests to the necessary indexd endpoints and converts them
-to GA4GH messages.
+This lambda proxies requests to the necessary indexd endpoints
+and converts them to GA4GH messages.
 
 """
 
-import requests
 import logging
 
 from chalice import Chalice, Response
+import requests
+import yaml
 
-INDEXD_URL = "https://dev.bionimbus.org/index"
-DOWNLOAD_URL = "https://dev.bionimbus.org/data/download"
+SWAGGER_URL = "https://raw.githubusercontent.com/david4096/data-object-schemas/client_headers/openapi/data_object_service.swagger.yaml"  # NOQA
+INDEXD_URL = "https://dev.planx-pla.net/index"
+DOWNLOAD_URL = "https://dev.planx-pla.net/user/data/download"
 
 app = Chalice(app_name='dos-indexd-lambda', debug=True)
 app.log.setLevel(logging.DEBUG)
+
+# Converter Functions
+
 
 def indexd_to_ga4gh(indexd):
     """
@@ -59,7 +64,8 @@ def indexd_to_ga4gh(indexd):
     # parse out checksums
     data_object['checksums'] = []
     for k in indexd['hashes']:
-        data_object['checksums'].append({'checksum': indexd['hashes'][k], 'type': k})
+        data_object['checksums'].append(
+            {'checksum': indexd['hashes'][k], 'type': k})
 
     # parse out the urls
     data_object['urls'] = []
@@ -70,19 +76,7 @@ def indexd_to_ga4gh(indexd):
             'user_metadata': indexd['metadata']})
 
     return data_object
-#
-#
-@app.route('/swagger.json', cors=True)
-def swagger():
-    """
-    An endpoint for returning the swagger api description.
 
-    :return:
-    """
-    req = requests.get("https://gist.githubusercontent.com/david4096/6dad2ea6a4ebcff8e0fe24c2210ae8ef/raw/55bf72546923c7bd9f63f3ea72d7441b0a506a76/data_object_service.gdc.swagger.json")
-    swagger_dict = req.json()
-    swagger_dict['basePath'] = '/api'
-    return swagger_dict
 
 def dos_list_request_to_indexd(dos_list):
     """
@@ -96,6 +90,7 @@ def dos_list_request_to_indexd(dos_list):
     mreq['start'] = dos_list.get('page_token', None)
     return mreq
 
+
 def gdc_to_dos_list_response(gdcr):
     """
     Takes a GDC list response and converts it to GA4GH.
@@ -105,17 +100,46 @@ def gdc_to_dos_list_response(gdcr):
     mres = {}
     mres['data_objects'] = []
     for id_ in gdcr.get('ids', []):
-        # Get the rest of the info for them...
-        #req = requests.get(
-        #    "https://signpost.opensciencedatacloud.org/index/{}".format(id_))
-        #mres['data_objects'].append(gdc_to_ga4gh(req.json()))
         mres['data_objects'].append({'id': id_})
     if len(gdcr.get('ids', [])) > 0:
-        mres['next_page_token'] = gdcr['ids'][-1:]
+        mres['next_page_token'] = gdcr['ids'][-1:][0]
     return mres
 
 
-@app.route('/ga4gh/dos/v1/dataobjects/{data_object_id}', methods=['GET'], cors=True)
+def not_found_response(data_object_id, e):
+    """
+    Creates a not found response to be returned using the exception
+    and requested data object ID.
+
+    :param data_object_id:
+    :param e:
+    :return:
+    """
+    not_found_msg = 'Data Object with data_object_id {} ' \
+                    'was not found. {} '.format(data_object_id, str(e))
+    return Response({'msg': not_found_msg},
+                    status_code=404)
+
+
+# Paths
+
+
+@app.route('/swagger.json', cors=True)
+def swagger():
+    """
+    Downloads the swagger from a reputable source and injects our change `api`.
+
+    :return:
+    """
+    req = requests.get(SWAGGER_URL)
+    swagger_dict = yaml.load(req.content)
+    swagger_dict['basePath'] = '/api/ga4gh/dos/v1'
+    return swagger_dict
+
+
+@app.route(
+    '/ga4gh/dos/v1/dataobjects/{data_object_id}',
+    methods=['GET'], cors=True)
 def get_data_object(data_object_id):
     """
     This endpoint returns DataObjects by their identifier by proxying the
@@ -124,22 +148,28 @@ def get_data_object(data_object_id):
     :return:
     """
     # Try to get fence session from the header.
-    fence_session = app.current_request.headers.get('fence_session', None)
+    authorization = app.current_request.headers.get('Authorization', None)
     download_url = None
-    if fence_session:
+    # FIXME this has been changed
+    if authorization:
         try:
-            download_url = requests.get(
+            response = requests.get(
                 "{}/{}".format(DOWNLOAD_URL, data_object_id),
-                cookies={'fence_session': fence_session}).json().get('url', None)
+                headers={'Authorization': authorization})
+            download_url = response.json()['url']
         except Exception as e:
             # the fence token probably wasn't good
             download_url = str(e)
     req = requests.get(
         "{}/index/{}".format(INDEXD_URL, data_object_id))
-    data_object = indexd_to_ga4gh(req.json())
+    if req.status_code == 200:
+        data_object = indexd_to_ga4gh(req.json())
+    else:
+        return not_found_response(data_object_id, req.get('message', ""))
     if download_url:
         data_object['urls'].append({'url': download_url})
-    return {'fence_session': fence_session, 'data_object': data_object}
+    return {'data_object': data_object}
+
 
 @app.route('/ga4gh/dos/v1/dataobjects/list', methods=['POST'], cors=True)
 def list_data_objects():
@@ -150,24 +180,38 @@ def list_data_objects():
     :return:
     """
     req_body = app.current_request.json_body
-    if req_body and (req_body.get('page_size', None) or req_body.get('page_token', None)):
+    if req_body:
+        page_token = req_body.get('page_token', None)
+        page_size = req_body.get('page_size', None)
+    else:
+        page_token = "0"
+        page_size = 100
+    if req_body and (page_token or page_size):
         gdc_req = dos_list_request_to_indexd(req_body)
     else:
         gdc_req = {}
-    signpost_req = requests.get("{}/index/".format(INDEXD_URL), params=gdc_req)
-    list_response = signpost_req.json()
+    response = requests.get("{}/index/".format(INDEXD_URL), params=gdc_req)
+    if response.status_code != 200:
+        return Response(
+            {'msg': 'The request was malformed {}'.format(
+                response.json().get('message', ""))})
+    list_response = response.json()
     return gdc_to_dos_list_response(list_response)
 
-@app.route('/ga4gh/dos/v1/dataobjects/{data_object_id}/versions', methods=['GET'], cors=True)
+
+@app.route(
+    '/ga4gh/dos/v1/dataobjects/{data_object_id}/versions',
+    methods=['GET'], cors=True)
 def get_data_object_versions(data_object_id):
     req = requests.get(
         "{}/index/{}".format(INDEXD_URL, data_object_id))
     return req.json()
-#
-#
+
+
 @app.route('/')
 def index():
-    message = "<h1>Welcome to the DOS lambda, send requests to /ga4gh/dos/v1/</h1>"
+    message = "<h1>Welcome to the DOS lambda, " \
+              "send requests to /ga4gh/dos/v1/</h1>"
     return Response(body=message,
                     status_code=200,
                     headers={'Content-Type': 'text/html'})

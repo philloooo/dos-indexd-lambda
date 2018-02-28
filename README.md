@@ -12,8 +12,8 @@ To make proper use of the service, one can either use cURL or an HTTP client to 
 following the [OpenAPI description](https://mkc9oddwq0.execute-api.us-west-2.amazonaws.com/api/swagger.json).
 
 ```
-# Will request the first page of Data Bundles from the service.
-curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' -d '{}' 'https://https://mkc9oddwq0.execute-api.us-west-2.amazonaws.com/api/ga4gh/dos/v1/dataobjects/list'
+# Will request the first page of Data Objects from the service.
+curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' -d '{}' 'https://mkc9oddwq0.execute-api.us-west-2.amazonaws.com/api/ga4gh/dos/v1/dataobjects/list'
 ```
 
 There is also a Python client available, that makes it easier to use the service from code.
@@ -46,7 +46,6 @@ but not yet in DOS.
 
 #### indexd/fence Features
 
-* Subscriptions
 * Authentication/Authorization
 * Aliases
 * Index management
