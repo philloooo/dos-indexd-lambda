@@ -12,8 +12,8 @@ import requests
 import yaml
 
 SWAGGER_URL = "https://raw.githubusercontent.com/david4096/data-object-schemas/client_headers/openapi/data_object_service.swagger.yaml"  # NOQA
-INDEXD_URL = "https://dev.planx-pla.net/index"
-DOWNLOAD_URL = "https://dev.planx-pla.net/user/data/download"
+INDEXD_URL = "https://dcp.bionimbus.org/index"
+DOWNLOAD_URL = "https://dcp.bionimbus.org/user/data/download"
 
 app = Chalice(app_name='dos-indexd-lambda', debug=True)
 app.log.setLevel(logging.DEBUG)
@@ -72,7 +72,7 @@ def indexd_to_ga4gh(indexd):
     for url in indexd['urls']:
         data_object['urls'].append({
             'url': url,
-            'system_metadata': indexd,
+            'system_metadata': None,
             'user_metadata': indexd['metadata']})
 
     return data_object
@@ -106,19 +106,22 @@ def gdc_to_dos_list_response(gdcr):
     return mres
 
 
-def not_found_response(data_object_id, e):
+def failure_response(data_object_id, response):
     """
-    Creates a not found response to be returned using the exception
+    Creates a failure response to be returned using the exception
     and requested data object ID.
 
     :param data_object_id:
     :param e:
     :return:
     """
-    not_found_msg = 'Data Object with data_object_id {} ' \
-                    'was not found. {} '.format(data_object_id, str(e))
-    return Response({'msg': not_found_msg},
-                    status_code=404)
+    if response.status_code == 404:
+        not_found_msg = 'Data Object with data_object_id {} ' \
+                    'was not found. {} '.format(data_object_id, str(response.json().get('error')))
+        return Response({'msg': not_found_msg},
+                         status_code=404)
+    else:
+        return Response({'msg': response.text}, status_code=response.status_code)
 
 
 # Paths
@@ -135,6 +138,34 @@ def swagger():
     swagger_dict = yaml.load(req.content)
     swagger_dict['basePath'] = '/api/ga4gh/dos/v1'
     return swagger_dict
+
+
+@app.route('/ga4gh/dos/v1/dataobjects/list', methods=['POST'], cors=True)
+def list_data_objects():
+    """
+    This endpoint translates DOS List requests into requests against indexd
+    and converts the responses into GA4GH messages.
+
+    :return:
+    """
+    req_body = app.current_request.json_body
+    if req_body:
+        page_token = req_body.get('page_token', None)
+        page_size = req_body.get('page_size', None)
+    else:
+        page_token = "0"
+        page_size = 100
+    if req_body and (page_token or page_size):
+        gdc_req = dos_list_request_to_indexd(req_body)
+    else:
+        gdc_req = {}
+    response = requests.get("{}/index/".format(INDEXD_URL), params=gdc_req)
+    if response.status_code != 200:
+        return Response(
+            {'msg': 'The request was malformed {}'.format(
+                response.json().get('message', ""))})
+    list_response = response.json()
+    return gdc_to_dos_list_response(list_response)
 
 
 @app.route(
@@ -165,38 +196,11 @@ def get_data_object(data_object_id):
     if req.status_code == 200:
         data_object = indexd_to_ga4gh(req.json())
     else:
-        return not_found_response(data_object_id, req.get('message', ""))
+        return failure_response(data_object_id, req)
     if download_url:
         data_object['urls'].append({'url': download_url})
     return {'data_object': data_object}
 
-
-@app.route('/ga4gh/dos/v1/dataobjects/list', methods=['POST'], cors=True)
-def list_data_objects():
-    """
-    This endpoint translates DOS List requests into requests against indexd
-    and converts the responses into GA4GH messages.
-
-    :return:
-    """
-    req_body = app.current_request.json_body
-    if req_body:
-        page_token = req_body.get('page_token', None)
-        page_size = req_body.get('page_size', None)
-    else:
-        page_token = "0"
-        page_size = 100
-    if req_body and (page_token or page_size):
-        gdc_req = dos_list_request_to_indexd(req_body)
-    else:
-        gdc_req = {}
-    response = requests.get("{}/index/".format(INDEXD_URL), params=gdc_req)
-    if response.status_code != 200:
-        return Response(
-            {'msg': 'The request was malformed {}'.format(
-                response.json().get('message', ""))})
-    list_response = response.json()
-    return gdc_to_dos_list_response(list_response)
 
 
 @app.route(
